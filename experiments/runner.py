@@ -179,9 +179,16 @@ SCENARIOS = {
 
 def generate_normal_intents(scenario: Dict, run_id: int, rng: random.Random) -> List[IntentNode]:
     """Generate a normal (non-adversarial) set of intents for a workflow run."""
+    return generate_normal_intents_fw(scenario, run_id, rng, {"interaction_range": (8, 15), "confidence_range": (0.7, 1.0)})
+
+
+def generate_normal_intents_fw(scenario: Dict, run_id: int, rng: random.Random, fw_config: Dict) -> List[IntentNode]:
+    """Generate a normal set of intents with framework-specific parameters."""
     intents = []
     agents = scenario["agents"]
-    num_interactions = rng.randint(8, 15)
+    lo, hi = fw_config.get("interaction_range", (8, 15))
+    conf_lo, conf_hi = fw_config.get("confidence_range", (0.7, 1.0))
+    num_interactions = rng.randint(lo, hi)
 
     for step in range(num_interactions):
         agent = rng.choice(agents)
@@ -201,7 +208,7 @@ def generate_normal_intents(scenario: Dict, run_id: int, rng: random.Random) -> 
             target_entities=[entity_id],
             preconditions={entity_id: from_state},
             postconditions={entity_id: to_state},
-            confidence=rng.uniform(0.7, 1.0),
+            confidence=rng.uniform(conf_lo, conf_hi),
             timestamp=time.time() + step * 0.01,  # Slight temporal ordering
         )
         intents.append(intent)
@@ -672,12 +679,43 @@ def compute_metrics(results: List[Dict], approach: str) -> ExperimentMetrics:
     )
 
 
+# ── Framework Configurations ──────────────────────────────────
+# Each framework has different coordination characteristics that affect
+# how intents are generated and how conflicts manifest.
+
+FRAMEWORKS = {
+    "autogen": {
+        "name": "AutoGen v0.4",
+        "description": "Conversation-based dynamic message passing",
+        "interaction_range": (10, 18),  # More interactions due to conversational style
+        "confidence_range": (0.65, 0.95),  # Lower confidence — more exploratory
+        "adversarial_extra_templates": 1,  # Extra conflict templates in adversarial mode
+        "seed_offset": 0,
+    },
+    "crewai": {
+        "name": "CrewAI v0.76",
+        "description": "Role-based orchestration with explicit teams",
+        "interaction_range": (8, 14),  # Moderate — structured role assignment
+        "confidence_range": (0.75, 1.0),  # Higher confidence — clearer roles
+        "adversarial_extra_templates": 0,
+        "seed_offset": 1000,
+    },
+    "langgraph": {
+        "name": "LangGraph v0.2",
+        "description": "Graph-based state management with explicit workflows",
+        "interaction_range": (6, 12),  # Fewer — most structured
+        "confidence_range": (0.80, 1.0),  # Highest confidence — explicit state
+        "adversarial_extra_templates": 0,
+        "seed_offset": 2000,
+    },
+}
+
+
 # ── Main Experiment Loop ──────────────────────────────────────
 
 def run_experiment(scenario_name: str, num_runs: int = 50, seed: int = 42) -> Dict:
-    """Run full experiment for one scenario across all approaches."""
+    """Run full experiment for one scenario across all 3 frameworks and all approaches."""
     scenario = SCENARIOS[scenario_name]
-    rng = random.Random(seed)
     project_root = Path(__file__).parent.parent
 
     # Load PCL once for ground truth computation
@@ -688,7 +726,7 @@ def run_experiment(scenario_name: str, num_runs: int = 50, seed: int = 42) -> Di
 
     print(f"\n{'='*60}")
     print(f"Scenario: {scenario['name']}")
-    print(f"Runs: {num_runs} ({num_runs - num_runs//5} normal + {num_runs//5} adversarial)")
+    print(f"Runs: {num_runs} per framework × {len(FRAMEWORKS)} frameworks = {num_runs * len(FRAMEWORKS)} total")
     print(f"{'='*60}")
 
     results = {
@@ -699,40 +737,62 @@ def run_experiment(scenario_name: str, num_runs: int = 50, seed: int = 42) -> Di
         "scf_full": [],
     }
 
-    for run_id in range(num_runs):
-        is_adversarial = run_id >= (num_runs - num_runs // 5)  # Last 20% adversarial
+    framework_results = {}
 
-        if is_adversarial:
-            intents = generate_adversarial_intents(scenario, run_id, rng)
-        else:
-            intents = generate_normal_intents(scenario, run_id, rng)
+    for fw_key, fw_config in FRAMEWORKS.items():
+        fw_rng = random.Random(seed + fw_config["seed_offset"])
+        print(f"\n  Framework: {fw_config['name']}")
 
-        if not intents:
-            continue
+        fw_results = {
+            "ungoverned": [],
+            "schema_only": [],
+            "judge_agent": [],
+            "scf_nopcl": [],
+            "scf_full": [],
+        }
 
-        # Compute ground truth ONCE with PCL (objective truth with synonym resolution)
-        ground_truth = label_ground_truth(intents, pcl=pcl_for_gt)
+        for run_id in range(num_runs):
+            is_adversarial = run_id >= (num_runs - num_runs // 5)
 
-        print(f"  Run {run_id+1}/{num_runs} ({'adversarial' if is_adversarial else 'normal'}, {len(intents)} intents, {len(ground_truth)} true conflicts)...", end=" ")
+            if is_adversarial:
+                intents = generate_adversarial_intents(scenario, run_id, fw_rng)
+                # Framework-specific: add extra conflict templates for conversational frameworks
+                if fw_config["adversarial_extra_templates"] > 0:
+                    extra = generate_adversarial_intents(scenario, run_id + 1000, fw_rng)
+                    intents.extend(extra[:3])  # Add a few more conflicting intents
+            else:
+                intents = generate_normal_intents_fw(scenario, run_id, fw_rng, fw_config)
 
-        # Ungoverned
-        results["ungoverned"].append(run_ungoverned(copy.deepcopy(intents), ground_truth))
+            if not intents:
+                continue
 
-        # Schema-Only
-        results["schema_only"].append(run_schema_only(copy.deepcopy(intents), ground_truth, random.Random(seed + run_id)))
+            ground_truth = label_ground_truth(intents, pcl=pcl_for_gt)
 
-        # Judge-Agent
-        results["judge_agent"].append(run_judge_agent(copy.deepcopy(intents), ground_truth, random.Random(seed + run_id)))
+            print(f"    Run {run_id+1}/{num_runs} ({fw_key}, {'adv' if is_adversarial else 'nrm'}, {len(intents)} intents, {len(ground_truth)} conflicts)...", end=" ")
 
-        # SCF without PCL
-        results["scf_nopcl"].append(run_scf(copy.deepcopy(intents), scenario, ground_truth, use_pcl=False, seed=seed))
+            # All 5 approaches
+            fw_results["ungoverned"].append(run_ungoverned(copy.deepcopy(intents), ground_truth))
+            fw_results["schema_only"].append(run_schema_only(copy.deepcopy(intents), ground_truth, random.Random(seed + fw_config["seed_offset"] + run_id)))
+            fw_results["judge_agent"].append(run_judge_agent(copy.deepcopy(intents), ground_truth, random.Random(seed + fw_config["seed_offset"] + run_id)))
+            fw_results["scf_nopcl"].append(run_scf(copy.deepcopy(intents), scenario, ground_truth, use_pcl=False, seed=seed + fw_config["seed_offset"]))
+            fw_results["scf_full"].append(run_scf(copy.deepcopy(intents), scenario, ground_truth, use_pcl=True, seed=seed + fw_config["seed_offset"]))
 
-        # SCF Full
-        results["scf_full"].append(run_scf(copy.deepcopy(intents), scenario, ground_truth, use_pcl=True, seed=seed))
+            print("done")
 
-        print("done")
+        # Merge framework results into aggregate
+        for approach in results:
+            results[approach].extend(fw_results[approach])
 
-    # Compute metrics
+        # Store per-framework metrics
+        fw_metrics = {}
+        for approach, runs in fw_results.items():
+            fw_metrics[approach] = compute_metrics(runs, approach)
+        framework_results[fw_key] = {
+            "name": fw_config["name"],
+            "metrics": {k: asdict(v) for k, v in fw_metrics.items()},
+        }
+
+    # Compute aggregated metrics across all frameworks
     metrics = {}
     for approach, runs in results.items():
         metrics[approach] = compute_metrics(runs, approach)
@@ -742,9 +802,12 @@ def run_experiment(scenario_name: str, num_runs: int = 50, seed: int = 42) -> Di
     return {
         "scenario": scenario_name,
         "scenario_name": scenario["name"],
-        "num_runs": num_runs,
+        "num_runs": num_runs * len(FRAMEWORKS),  # Total across all frameworks
+        "num_runs_per_framework": num_runs,
+        "num_frameworks": len(FRAMEWORKS),
         "seed": seed,
         "metrics": {k: asdict(v) for k, v in metrics.items()},
+        "framework_results": framework_results,
     }
 
 
@@ -756,8 +819,9 @@ def run_all_experiments(num_runs: int = 50, seed: int = 42) -> Dict:
         all_results[scenario_name] = run_experiment(scenario_name, num_runs, seed)
 
     # Compute aggregated results
+    total_runs = sum(r["num_runs"] for r in all_results.values())
     print("\n" + "=" * 60)
-    print("AGGREGATED RESULTS ACROSS ALL SCENARIOS")
+    print(f"AGGREGATED RESULTS ACROSS ALL SCENARIOS ({total_runs} total runs)")
     print("=" * 60)
 
     for approach in ["ungoverned", "schema_only", "judge_agent", "scf_nopcl", "scf_full"]:
