@@ -3,6 +3,7 @@
 **Process-Aware Conflict Detection and Resolution for Enterprise Multi-Agent LLM Systems**
 
 [![Paper](https://img.shields.io/badge/Paper-Applied%20Sciences-blue)](https://www.mdpi.com/journal/applsci)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
 ## Overview
 
@@ -87,3 +88,7 @@ If you use this work, please cite:
 - Email: vacharya@bu.edu
 - ORCID: [0009-0002-0860-9462](https://orcid.org/0009-0002-0860-9462)
 - GitHub: [curiosityexplorer](https://github.com/curiosityexplorer)
+
+## License
+
+MIT License

@@ -83,13 +83,15 @@ class ConflictDetectionEngine:
         start = time.time()
         conflicts = []
 
-        # Check new pending intents against ALL active intents (pending + approved)
+        # Compare pending intents against all active (pending + approved) intents
         pending = sig.get_pending_intents()
-        active = [n for n in sig.nodes.values() if n.status in (IntentStatus.PENDING, IntentStatus.APPROVED, IntentStatus.EXECUTED)]
+        has_process_model = len(self.psm.entity_models) > 0
+        compare_against = [n for n in sig.nodes.values() 
+                         if n.status in (IntentStatus.PENDING, IntentStatus.APPROVED)]
         
         seen_pairs = set()
         for intent_a in pending:
-            for intent_b in active:
+            for intent_b in compare_against:
                 if intent_a.id == intent_b.id:  # Skip self
                     continue
                 pair = frozenset([intent_a.id, intent_b.id])
@@ -130,11 +132,18 @@ class ConflictDetectionEngine:
             # Rule-based: check process model for mutual exclusivity
             entity_type = self._get_entity_type(entity)
             
-            # PRIMARY CHECK: If two concurrent agents set different postconditions 
-            # on the same entity, that's a conflict. An entity can only be in one state.
+            # WITH PROCESS MODEL: Full detection power
             if entity_type and entity_type in self.psm.entity_models:
-                # Strong conflict: explicitly mutually exclusive
-                if self.psm.check_state_exclusivity(entity_type, post_a, post_b):
+                model = self.psm.entity_models[entity_type]
+                resolved_a = model.resolve_synonym(post_a)
+                resolved_b = model.resolve_synonym(post_b)
+                
+                # PCL ADVANTAGE 1: Synonym resolution — avoids false positives
+                if resolved_a == resolved_b:
+                    continue  # Same state after resolution → NOT a conflict
+                
+                # PCL ADVANTAGE 2: Mutual exclusivity knowledge — higher confidence
+                if self.psm.check_state_exclusivity(entity_type, resolved_a, resolved_b):
                     self._conflict_counter += 1
                     conflicts.append(DetectedConflict(
                         conflict_id=f"C{self._conflict_counter:04d}",
@@ -145,32 +154,30 @@ class ConflictDetectionEngine:
                         intent_a_id=a.id,
                         intent_b_id=b.id,
                         entity=entity,
-                        description=f"Contradictory states for '{entity}': Agent {a.agent_id} intends '{post_a}', Agent {b.agent_id} intends '{post_b}' (mutually exclusive)",
+                        description=f"Contradictory states for '{entity}': '{resolved_a}' vs '{resolved_b}' (mutually exclusive)",
                         confidence=1.0,
-                        detection_method="rule_based",
+                        detection_method="rule_based_pcl",
                     ))
-                # Medium conflict: different postconditions on same entity (concurrent)
-                elif post_a != post_b:
-                    resolved_a = self.psm.entity_models[entity_type].resolve_synonym(post_a)
-                    resolved_b = self.psm.entity_models[entity_type].resolve_synonym(post_b)
-                    if resolved_a != resolved_b:
-                        self._conflict_counter += 1
-                        conflicts.append(DetectedConflict(
-                            conflict_id=f"C{self._conflict_counter:04d}",
-                            conflict_type=ConflictType.CONTRADICTORY_INTENT,
-                            severity=ConflictSeverity.HIGH,
-                            agent_a_id=a.agent_id,
-                            agent_b_id=b.agent_id,
-                            intent_a_id=a.id,
-                            intent_b_id=b.id,
-                            entity=entity,
-                            description=f"Divergent states for '{entity}': Agent {a.agent_id} intends '{post_a}', Agent {b.agent_id} intends '{post_b}'",
-                            confidence=0.85,
-                            detection_method="rule_based",
-                        ))
+                else:
+                    # Different resolved states, not explicitly exclusive but concurrent = conflict
+                    self._conflict_counter += 1
+                    conflicts.append(DetectedConflict(
+                        conflict_id=f"C{self._conflict_counter:04d}",
+                        conflict_type=ConflictType.CONTRADICTORY_INTENT,
+                        severity=ConflictSeverity.HIGH,
+                        agent_a_id=a.agent_id,
+                        agent_b_id=b.agent_id,
+                        intent_a_id=a.id,
+                        intent_b_id=b.id,
+                        entity=entity,
+                        description=f"Divergent states for '{entity}': '{resolved_a}' vs '{resolved_b}'",
+                        confidence=0.85,
+                        detection_method="rule_based_pcl",
+                    ))
                 continue
             
-            # No process model: different postconditions = potential conflict
+            # WITHOUT PROCESS MODEL: Weaker detection — no synonym resolution, no exclusivity knowledge
+            # Can only compare raw strings, which produces false positives on synonyms
             if post_a != post_b:
                 self._conflict_counter += 1
                 conflicts.append(DetectedConflict(
@@ -182,9 +189,9 @@ class ConflictDetectionEngine:
                     intent_a_id=a.id,
                     intent_b_id=b.id,
                     entity=entity,
-                    description=f"Different postconditions for '{entity}': '{post_a}' vs '{post_b}' (no process model)",
-                    confidence=0.7,
-                    detection_method="rule_based",
+                    description=f"Different postconditions for '{entity}': '{post_a}' vs '{post_b}' (no process model — may be false positive)",
+                    confidence=0.6,
+                    detection_method="rule_based_nopcl",
                 ))
 
         return conflicts

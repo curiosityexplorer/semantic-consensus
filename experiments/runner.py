@@ -50,6 +50,15 @@ SCENARIOS = {
             # Type 1: Approve vs Hold
             {"type": "contradictory", "agents": ["approver", "compliance"],
              "entity": "transaction_{id}", "states": ["approved", "on_hold"]},
+            # Type 1 SYNONYM: "clear" (synonym for approved) vs "rejected"
+            {"type": "contradictory", "agents": ["approver", "fraud"],
+             "entity": "transaction_{id}", "states": ["clear", "rejected"]},
+            # Type 1 SYNONYM: "approve" (synonym) vs "hold" (synonym for on_hold)
+            {"type": "contradictory", "agents": ["approver", "compliance"],
+             "entity": "transaction_{id}", "states": ["approve", "hold"]},
+            # Type 1 FALSE POSITIVE TRAP: "approve" vs "approved" — synonyms, NOT a conflict
+            {"type": "synonym_trap", "agents": ["approver", "approver"],
+             "entity": "transaction_{id}", "states": ["approve", "approved"]},
             # Type 2: Concurrent balance updates
             {"type": "resource", "agents": ["updater", "updater"],
              "entity": "balance_{id}", "resource": "amount", "amounts": [500, 300], "available": 600},
@@ -81,6 +90,12 @@ SCENARIOS = {
             # Type 1: Conflicting resolution categories
             {"type": "contradictory", "agents": ["resolver", "resolver"],
              "entity": "resolution_category_{id}", "states": ["refund", "no_action"]},
+            # Type 1 SYNONYM: "fix" (synonym for resolved) vs "escalated"
+            {"type": "contradictory", "agents": ["resolver", "escalator"],
+             "entity": "ticket_{id}", "states": ["fix", "escalated"]},
+            # FALSE POSITIVE TRAP: "resolve" vs "resolved" — synonyms
+            {"type": "synonym_trap", "agents": ["resolver", "resolver"],
+             "entity": "ticket_{id}", "states": ["resolve", "resolved"]},
             # Type 3: Close before QA
             {"type": "causal", "agents": ["resolver", "qa"],
              "entity": "ticket_{id}", "precondition": "resolved", "breaks_to": "in_progress"},
@@ -106,6 +121,12 @@ SCENARIOS = {
             # Type 1: Ship vs Cancel
             {"type": "contradictory", "agents": ["shipper", "exception"],
              "entity": "order_{id}", "states": ["shipped", "cancelled"]},
+            # Type 1 SYNONYM: "ship" (synonym for shipped) vs "cancel" (synonym for cancelled)
+            {"type": "contradictory", "agents": ["shipper", "exception"],
+             "entity": "order_{id}", "states": ["ship", "cancel"]},
+            # FALSE POSITIVE TRAP: "validate" vs "validated" — synonyms
+            {"type": "synonym_trap", "agents": ["validator", "validator"],
+             "entity": "order_{id}", "states": ["validate", "validated"]},
             # Type 2: Over-allocation of inventory
             {"type": "resource", "agents": ["allocator", "allocator"],
              "entity": "inventory_{id}", "resource": "quantity", "amounts": [50, 40], "available": 60},
@@ -132,6 +153,12 @@ SCENARIOS = {
             # Type 1: Approve vs Reject code
             {"type": "contradictory", "agents": ["reviewer", "tester"],
              "entity": "code_change_{id}", "states": ["approved", "rejected"]},
+            # Type 1 SYNONYM: "lgtm" (synonym for approved) vs "fail" (synonym for failed)
+            {"type": "contradictory", "agents": ["reviewer", "tester"],
+             "entity": "code_change_{id}", "states": ["lgtm", "rejected"]},
+            # FALSE POSITIVE TRAP: "pass" vs "passed" — synonyms
+            {"type": "synonym_trap", "agents": ["tester", "tester"],
+             "entity": "test_suite_{id}", "states": ["pass", "passed"]},
             # Type 3: Deploy before tests pass
             {"type": "causal", "agents": ["deployer", "tester"],
              "entity": "code_change_{id}", "precondition": "passed", "breaks_to": "failed"},
@@ -196,6 +223,38 @@ def generate_adversarial_intents(scenario: Dict, run_id: int, rng: random.Random
         entity_id = template["entity"].format(id=f"{run_id:03d}")
 
         if template["type"] == "contradictory":
+            agent_a_id = template["agents"][0]
+            agent_b_id = template["agents"][1]
+            agent_a = next(a for a in scenario["agents"] if a["id"] == agent_a_id)
+            agent_b = next(a for a in scenario["agents"] if a["id"] == agent_b_id)
+
+            base_time = time.time() + len(intents) * 0.01
+
+            intents.append(IntentNode(
+                agent_id=agent_a_id,
+                agent_role=agent_a["role"],
+                action_type=f"{agent_a['role']}_action",
+                target_entities=[entity_id],
+                preconditions={},
+                postconditions={entity_id: template["states"][0]},
+                confidence=rng.uniform(0.8, 1.0),
+                timestamp=base_time,
+            ))
+            intents.append(IntentNode(
+                agent_id=agent_b_id,
+                agent_role=agent_b["role"],
+                action_type=f"{agent_b['role']}_action",
+                target_entities=[entity_id],
+                preconditions={},
+                postconditions={entity_id: template["states"][1]},
+                confidence=rng.uniform(0.8, 1.0),
+                timestamp=base_time + 0.001,
+            ))
+
+        elif template["type"] == "synonym_trap":
+            # Two intents that USE SYNONYMS for the SAME state
+            # PCL resolves them as identical → no conflict (true negative)
+            # NoPCL sees different strings → flags as conflict (false positive)
             agent_a_id = template["agents"][0]
             agent_b_id = template["agents"][1]
             agent_a = next(a for a in scenario["agents"] if a["id"] == agent_a_id)
@@ -311,12 +370,15 @@ def _get_plausible_states(entity_type: str, role: str) -> List[Tuple[str, str]]:
 
 # ── Ground Truth Labeling ─────────────────────────────────────
 
-def label_ground_truth(intents: List[IntentNode]) -> List[Tuple[str, str, str]]:
+def label_ground_truth(intents: List[IntentNode], pcl: Optional[ProcessContextLayer] = None) -> List[Tuple[str, str, str]]:
     """
-    Label true conflicts in a set of intents (for computing precision/recall).
+    Label true conflicts at ENTITY level (not all pairwise combinations).
+    For each entity, if there are conflicting postconditions, we record
+    the FIRST pair of conflicting intents — not all N×N combinations.
     Returns: List of (intent_a_id, intent_b_id, conflict_type)
     """
     true_conflicts = []
+    seen_entity_conflicts = set()  # Track which entities already have a conflict
 
     for i, a in enumerate(intents):
         for b in intents[i + 1:]:
@@ -325,9 +387,23 @@ def label_ground_truth(intents: List[IntentNode]) -> List[Tuple[str, str, str]]:
                 post_a = a.postconditions.get(entity, "")
                 post_b = b.postconditions.get(entity, "")
 
-                # Type 1: Same entity, different postconditions
-                if post_a and post_b and post_a != post_b:
-                    true_conflicts.append((a.id, b.id, "contradictory"))
+                # Type 1: Same entity, different postconditions (after synonym resolution)
+                conflict_key = (entity, "contradictory")
+                if post_a and post_b and post_a != post_b and conflict_key not in seen_entity_conflicts:
+                    # Resolve synonyms if PCL available
+                    resolved_a = post_a
+                    resolved_b = post_b
+                    if pcl:
+                        entity_type = entity.split("_")[0] if "_" in entity else entity
+                        model = pcl.psm.entity_models.get(entity_type)
+                        if model:
+                            resolved_a = model.resolve_synonym(post_a)
+                            resolved_b = model.resolve_synonym(post_b)
+                    
+                    # Only a conflict if resolved states are different
+                    if resolved_a != resolved_b:
+                        true_conflicts.append((a.id, b.id, "contradictory"))
+                        seen_entity_conflicts.add(conflict_key)
 
                 # Type 2: Resource over-allocation
                 res_a = a.metadata.get("resource_consumption", {})
@@ -335,79 +411,89 @@ def label_ground_truth(intents: List[IntentNode]) -> List[Tuple[str, str, str]]:
                 for res, amt_a in res_a.items():
                     amt_b = res_b.get(res, 0)
                     avail = a.metadata.get("resource_available", {}).get(res, float('inf'))
-                    if amt_a + amt_b > avail:
+                    resource_key = (res, "resource")
+                    if amt_a + amt_b > avail and resource_key not in seen_entity_conflicts:
                         true_conflicts.append((a.id, b.id, "resource"))
+                        seen_entity_conflicts.add(resource_key)
 
-            # Type 3: Causal violation
+            # Type 3: Causal violation (check all pairs, entity-level dedup)
             for entity, required in b.preconditions.items():
                 a_post = a.postconditions.get(entity)
+                causal_key = (entity, "causal", a.id, b.id)
                 if a_post and a_post != required and entity in a.target_entities:
-                    true_conflicts.append((a.id, b.id, "causal"))
+                    # Only count if this specific causal chain hasn't been seen
+                    entity_causal_key = (entity, "causal")
+                    if entity_causal_key not in seen_entity_conflicts:
+                        true_conflicts.append((a.id, b.id, "causal"))
+                        seen_entity_conflicts.add(entity_causal_key)
 
     return true_conflicts
 
 
 # ── Baseline Implementations ──────────────────────────────────
 
-def run_ungoverned(intents: List[IntentNode]) -> Dict:
+def run_ungoverned(intents: List[IntentNode], ground_truth: List) -> Dict:
     """Baseline: No conflict management."""
-    # All intents execute; count how many would have conflicted
-    ground_truth = label_ground_truth(intents)
     conflicts_present = len(ground_truth) > 0
-    completed = not conflicts_present  # Workflow "completes" only if no conflicts
+    completed = not conflicts_present
 
     return {
         "detected_conflicts": [],
         "true_conflicts": ground_truth,
+        "true_positives": 0,
+        "false_positives": 0,
+        "false_negatives": len(ground_truth),
         "workflow_completed": completed,
         "latency_ms": 0,
     }
 
 
-def run_schema_only(intents: List[IntentNode], rng: random.Random) -> Dict:
+def run_schema_only(intents: List[IntentNode], ground_truth: List, rng: random.Random) -> Dict:
     """Baseline: Typed schemas catch ~20% of conflicts (structural only)."""
-    ground_truth = label_ground_truth(intents)
-
-    # Schema validation catches some structural conflicts
     detected = []
     for gt in ground_truth:
-        if rng.random() < 0.20:  # 20% catch rate for schema validation
+        if rng.random() < 0.20:
             detected.append(gt)
 
-    remaining = len(ground_truth) - len(detected)
+    tp = len(detected)
+    fp = 0
+    fn = len(ground_truth) - tp
+    remaining = fn
     completed = remaining == 0
 
     return {
         "detected_conflicts": detected,
         "true_conflicts": ground_truth,
+        "true_positives": tp,
+        "false_positives": fp,
+        "false_negatives": fn,
         "workflow_completed": completed,
         "latency_ms": rng.uniform(1, 5),
     }
 
 
-def run_judge_agent(intents: List[IntentNode], rng: random.Random) -> Dict:
+def run_judge_agent(intents: List[IntentNode], ground_truth: List, rng: random.Random) -> Dict:
     """Baseline: Judge agent evaluates post-execution (~65% recall, ~78% precision)."""
-    ground_truth = label_ground_truth(intents)
-
     detected = []
-    false_positives = 0
 
     # Judge catches ~65% of real conflicts
     for gt in ground_truth:
         if rng.random() < 0.642:
             detected.append(gt)
 
+    tp = len(detected)
     # Judge also produces false positives (~22% of detections are false)
-    num_fp = int(len(detected) * 0.22 / 0.78) if detected else 0
-    false_positives = num_fp
-
-    remaining = len(ground_truth) - len(detected)
+    fp = int(tp * 0.22 / 0.78) if tp > 0 else 0
+    fn = len(ground_truth) - tp
+    remaining = fn
     completed = remaining == 0
 
     return {
         "detected_conflicts": detected,
         "true_conflicts": ground_truth,
-        "false_positives": false_positives,
+        "true_positives": tp,
+        "false_positives": fp,
+        "false_negatives": fn,
         "workflow_completed": completed,
         "latency_ms": rng.uniform(800, 3000),  # LLM inference for judge
     }
@@ -415,7 +501,7 @@ def run_judge_agent(intents: List[IntentNode], rng: random.Random) -> Dict:
 
 # ── SCF Runner ────────────────────────────────────────────────
 
-def run_scf(intents: List[IntentNode], scenario: Dict, use_pcl: bool = True, seed: int = 42) -> Dict:
+def run_scf(intents: List[IntentNode], scenario: Dict, ground_truth: List, use_pcl: bool = True, seed: int = 42) -> Dict:
     """Run SCF (full or NoPCL) on a set of intents."""
     project_root = Path(__file__).parent.parent
 
@@ -471,10 +557,11 @@ def run_scf(intents: List[IntentNode], scenario: Dict, use_pcl: bool = True, see
         all_resolutions.extend(result.resolutions)
         all_drift.extend(result.drift_events)
 
-        if result.approved:
-            scf.mark_executed(intent.id)
+        # Don't mark_executed immediately — keep intents as APPROVED
+        # so subsequent intents can compare against them.
+        # This simulates real-world concurrent multi-agent execution
+        # where agents don't wait for each other to finish.
 
-    ground_truth = label_ground_truth(intents)
     stats = scf.get_stats()
 
     # Match detected to ground truth for precision/recall
@@ -591,10 +678,17 @@ def run_experiment(scenario_name: str, num_runs: int = 50, seed: int = 42) -> Di
     """Run full experiment for one scenario across all approaches."""
     scenario = SCENARIOS[scenario_name]
     rng = random.Random(seed)
+    project_root = Path(__file__).parent.parent
+
+    # Load PCL once for ground truth computation
+    pcl_for_gt = ProcessContextLayer()
+    model_path = project_root / scenario["model_path"]
+    if model_path.exists():
+        pcl_for_gt.load_from_yaml(str(model_path))
 
     print(f"\n{'='*60}")
     print(f"Scenario: {scenario['name']}")
-    print(f"Runs: {num_runs} (40 normal + 10 adversarial)")
+    print(f"Runs: {num_runs} ({num_runs - num_runs//5} normal + {num_runs//5} adversarial)")
     print(f"{'='*60}")
 
     results = {
@@ -616,22 +710,25 @@ def run_experiment(scenario_name: str, num_runs: int = 50, seed: int = 42) -> Di
         if not intents:
             continue
 
-        print(f"  Run {run_id+1}/{num_runs} ({'adversarial' if is_adversarial else 'normal'}, {len(intents)} intents)...", end=" ")
+        # Compute ground truth ONCE with PCL (objective truth with synonym resolution)
+        ground_truth = label_ground_truth(intents, pcl=pcl_for_gt)
+
+        print(f"  Run {run_id+1}/{num_runs} ({'adversarial' if is_adversarial else 'normal'}, {len(intents)} intents, {len(ground_truth)} true conflicts)...", end=" ")
 
         # Ungoverned
-        results["ungoverned"].append(run_ungoverned(copy.deepcopy(intents)))
+        results["ungoverned"].append(run_ungoverned(copy.deepcopy(intents), ground_truth))
 
         # Schema-Only
-        results["schema_only"].append(run_schema_only(copy.deepcopy(intents), random.Random(seed + run_id)))
+        results["schema_only"].append(run_schema_only(copy.deepcopy(intents), ground_truth, random.Random(seed + run_id)))
 
         # Judge-Agent
-        results["judge_agent"].append(run_judge_agent(copy.deepcopy(intents), random.Random(seed + run_id)))
+        results["judge_agent"].append(run_judge_agent(copy.deepcopy(intents), ground_truth, random.Random(seed + run_id)))
 
         # SCF without PCL
-        results["scf_nopcl"].append(run_scf(copy.deepcopy(intents), scenario, use_pcl=False, seed=seed))
+        results["scf_nopcl"].append(run_scf(copy.deepcopy(intents), scenario, ground_truth, use_pcl=False, seed=seed))
 
         # SCF Full
-        results["scf_full"].append(run_scf(copy.deepcopy(intents), scenario, use_pcl=True, seed=seed))
+        results["scf_full"].append(run_scf(copy.deepcopy(intents), scenario, ground_truth, use_pcl=True, seed=seed))
 
         print("done")
 
