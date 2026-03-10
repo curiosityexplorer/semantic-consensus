@@ -1,0 +1,100 @@
+# Scenario 4: Software Development Workflow
+# 4 agents: code_generator, code_reviewer, test_runner, deployment_agent
+
+entities:
+  - type: code_change
+    states: [drafted, submitted, reviewing, approved, rejected, revision_needed, merged]
+    terminal_states: [merged, rejected]
+    mutually_exclusive:
+      - [approved, rejected]
+      - [merged, rejected]
+    transitions:
+      - {from: drafted, to: submitted, role: code_generator}
+      - {from: submitted, to: reviewing, role: code_reviewer}
+      - {from: reviewing, to: approved, role: code_reviewer}
+      - {from: reviewing, to: rejected, role: code_reviewer}
+      - {from: reviewing, to: revision_needed, role: code_reviewer}
+      - {from: revision_needed, to: submitted, role: code_generator}
+      - {from: approved, to: merged, role: deployment_agent}
+    synonyms:
+      approve: approved
+      reject: rejected
+      merge: merged
+      submit: submitted
+      lgtm: approved
+
+  - type: test_suite
+    states: [not_run, running, passed, failed, error]
+    terminal_states: []
+    mutually_exclusive:
+      - [passed, failed]
+      - [passed, error]
+    transitions:
+      - {from: not_run, to: running, role: test_runner}
+      - {from: running, to: passed, role: test_runner}
+      - {from: running, to: failed, role: test_runner}
+      - {from: running, to: error, role: test_runner}
+      - {from: passed, to: running, role: test_runner}
+      - {from: failed, to: running, role: test_runner}
+    synonyms:
+      pass: passed
+      fail: failed
+      green: passed
+      red: failed
+
+  - type: deployment
+    states: [not_deployed, staging, production, rolled_back, failed]
+    terminal_states: [rolled_back]
+    mutually_exclusive:
+      - [production, rolled_back]
+      - [production, failed]
+    transitions:
+      - {from: not_deployed, to: staging, role: deployment_agent}
+      - {from: staging, to: production, role: deployment_agent}
+      - {from: staging, to: rolled_back, role: deployment_agent}
+      - {from: production, to: rolled_back, role: deployment_agent}
+    synonyms:
+      deploy: production
+      rollback: rolled_back
+      stage: staging
+
+authorities:
+  - role: code_reviewer
+    entity_type: code_change
+    transitions: [[reviewing, approved], [reviewing, rejected]]
+    priority: 80
+  - role: test_runner
+    entity_type: test_suite
+    transitions: [[not_run, running], [running, passed], [running, failed]]
+    priority: 85
+  - role: deployment_agent
+    entity_type: deployment
+    transitions: [[not_deployed, staging], [staging, production]]
+    priority: 70
+  - role: code_generator
+    entity_type: code_change
+    transitions: [[drafted, submitted]]
+    priority: 50
+
+temporal_constraints:
+  - before: run_tests
+    after: deploy_to_staging
+    entity_type: code_change
+    description: "Tests must pass before deployment"
+  - before: code_review
+    after: merge_code
+    entity_type: code_change
+    description: "Code review must complete before merge"
+  - before: deploy_to_staging
+    after: deploy_to_production
+    entity_type: deployment
+    description: "Must deploy to staging before production"
+
+vocabulary:
+  approve: approved
+  reject: rejected
+  merge: merged
+  deploy: production
+  rollback: rolled_back
+  pass: passed
+  fail: failed

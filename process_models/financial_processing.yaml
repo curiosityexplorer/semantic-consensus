@@ -1,0 +1,125 @@
+# Scenario 1: Financial Transaction Processing
+# 5 agents: compliance_checker, fraud_detector, transaction_approver, account_updater, notification_dispatcher
+
+entities:
+  - type: transaction
+    states: [pending, under_review, approved, rejected, flagged, on_hold, completed, cancelled]
+    terminal_states: [completed, cancelled]
+    mutually_exclusive:
+      - [approved, rejected]
+      - [approved, on_hold]
+      - [approved, flagged]
+      - [completed, cancelled]
+      - [rejected, completed]
+    transitions:
+      - {from: pending, to: under_review, role: compliance_checker}
+      - {from: pending, to: flagged, role: fraud_detector}
+      - {from: under_review, to: approved, role: transaction_approver}
+      - {from: under_review, to: rejected, role: transaction_approver}
+      - {from: under_review, to: on_hold, role: compliance_checker}
+      - {from: flagged, to: under_review, role: fraud_detector}
+      - {from: flagged, to: rejected, role: fraud_detector}
+      - {from: approved, to: completed, role: account_updater}
+      - {from: rejected, to: cancelled, role: account_updater}
+      - {from: on_hold, to: under_review, role: compliance_checker}
+      - {from: on_hold, to: rejected, role: compliance_checker}
+    synonyms:
+      approve: approved
+      reject: rejected
+      flag: flagged
+      hold: on_hold
+      complete: completed
+      cancel: cancelled
+      review: under_review
+
+  - type: account
+    states: [active, suspended, under_review, frozen, closed]
+    terminal_states: [closed]
+    mutually_exclusive:
+      - [active, frozen]
+      - [active, suspended]
+    transitions:
+      - {from: active, to: under_review, role: compliance_checker}
+      - {from: active, to: suspended, role: fraud_detector}
+      - {from: active, to: frozen, role: compliance_checker}
+      - {from: under_review, to: active, role: compliance_checker}
+      - {from: suspended, to: active, role: fraud_detector}
+      - {from: frozen, to: active, role: compliance_checker}
+    synonyms:
+      freeze: frozen
+      suspend: suspended
+
+  - type: balance
+    states: [unchanged, credited, debited, adjusted]
+    terminal_states: []
+    mutually_exclusive:
+      - [credited, debited]
+    transitions:
+      - {from: unchanged, to: credited, role: account_updater}
+      - {from: unchanged, to: debited, role: account_updater}
+      - {from: unchanged, to: adjusted, role: account_updater}
+    synonyms:
+      credit: credited
+      debit: debited
+
+authorities:
+  - role: compliance_checker
+    entity_type: transaction
+    transitions: [[pending, on_hold], [under_review, on_hold], [on_hold, rejected]]
+    priority: 90
+  - role: compliance_checker
+    entity_type: account
+    transitions: [[active, frozen], [active, under_review]]
+    priority: 90
+  - role: fraud_detector
+    entity_type: transaction
+    transitions: [[pending, flagged], [flagged, rejected]]
+    priority: 85
+  - role: transaction_approver
+    entity_type: transaction
+    transitions: [[under_review, approved], [under_review, rejected]]
+    priority: 70
+  - role: account_updater
+    entity_type: balance
+    transitions: [[unchanged, credited], [unchanged, debited]]
+    priority: 50
+  - role: notification_dispatcher
+    entity_type: transaction
+    transitions: []
+    priority: 10
+
+temporal_constraints:
+  - before: compliance_check
+    after: approve_transaction
+    entity_type: transaction
+    description: "Compliance check must complete before approval"
+  - before: fraud_check
+    after: approve_transaction
+    entity_type: transaction
+    description: "Fraud check must complete before approval"
+  - before: approve_transaction
+    after: update_balance
+    entity_type: transaction
+    description: "Transaction must be approved before balance update"
+  - before: update_balance
+    after: send_notification
+    entity_type: transaction
+    description: "Balance must be updated before notification"
+
+vocabulary:
+  approve: approved
+  reject: rejected
+  hold: on_hold
+  flag: flagged
+  clear: approved
+  block: rejected
+  freeze: frozen
+  suspend: suspended
+
+resource_constraints:
+  - entity_type: balance
+    field: amount
+    constraint: {min: 0}
+  - entity_type: transaction
+    field: amount
+    constraint: {min: 0.01, max: 1000000}

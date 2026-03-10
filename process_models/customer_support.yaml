@@ -1,0 +1,95 @@
+# Scenario 2: Customer Support Resolution
+# 4 agents: ticket_classifier, resolution_agent, escalation_agent, qa_agent
+
+entities:
+  - type: ticket
+    states: [new, classified, in_progress, resolved, escalated, reopened, closed, archived]
+    terminal_states: [closed, archived]
+    mutually_exclusive:
+      - [resolved, escalated]
+      - [closed, reopened]
+      - [resolved, reopened]
+    transitions:
+      - {from: new, to: classified, role: ticket_classifier}
+      - {from: classified, to: in_progress, role: resolution_agent}
+      - {from: in_progress, to: resolved, role: resolution_agent}
+      - {from: in_progress, to: escalated, role: escalation_agent}
+      - {from: escalated, to: in_progress, role: resolution_agent}
+      - {from: resolved, to: closed, role: qa_agent}
+      - {from: resolved, to: reopened, role: qa_agent}
+      - {from: reopened, to: in_progress, role: resolution_agent}
+      - {from: closed, to: archived, role: qa_agent}
+    synonyms:
+      resolve: resolved
+      escalate: escalated
+      close: closed
+      reopen: reopened
+      fix: resolved
+      done: resolved
+      complete: resolved
+
+  - type: resolution_category
+    states: [unset, refund, replacement, technical_fix, escalation, no_action]
+    terminal_states: []
+    mutually_exclusive:
+      - [refund, no_action]
+      - [replacement, no_action]
+      - [refund, replacement]
+    transitions:
+      - {from: unset, to: refund, role: resolution_agent}
+      - {from: unset, to: replacement, role: resolution_agent}
+      - {from: unset, to: technical_fix, role: resolution_agent}
+      - {from: unset, to: escalation, role: escalation_agent}
+      - {from: unset, to: no_action, role: resolution_agent}
+    synonyms:
+      money_back: refund
+      send_new: replacement
+      bug_fix: technical_fix
+
+  - type: customer_satisfaction
+    states: [unknown, satisfied, dissatisfied, neutral]
+    terminal_states: []
+    mutually_exclusive:
+      - [satisfied, dissatisfied]
+    transitions:
+      - {from: unknown, to: satisfied, role: qa_agent}
+      - {from: unknown, to: dissatisfied, role: qa_agent}
+      - {from: unknown, to: neutral, role: qa_agent}
+    synonyms: {}
+
+authorities:
+  - role: escalation_agent
+    entity_type: ticket
+    transitions: [[in_progress, escalated]]
+    priority: 80
+  - role: qa_agent
+    entity_type: ticket
+    transitions: [[resolved, closed], [resolved, reopened]]
+    priority: 75
+  - role: resolution_agent
+    entity_type: ticket
+    transitions: [[classified, in_progress], [in_progress, resolved]]
+    priority: 60
+  - role: ticket_classifier
+    entity_type: ticket
+    transitions: [[new, classified]]
+    priority: 50
+
+temporal_constraints:
+  - before: classify_ticket
+    after: start_resolution
+    entity_type: ticket
+    description: "Ticket must be classified before resolution begins"
+  - before: resolve_ticket
+    after: qa_review
+    entity_type: ticket
+    description: "Resolution must complete before QA review"
+
+vocabulary:
+  resolve: resolved
+  escalate: escalated
+  close: closed
+  fix: resolved
+  done: resolved
+  refund: refund
+  replace: replacement

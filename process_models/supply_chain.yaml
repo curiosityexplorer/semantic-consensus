@@ -1,0 +1,114 @@
+# Scenario 3: Supply Chain Order Fulfillment
+# 6 agents: order_validator, inventory_allocator, shipping_coordinator, payment_processor, customer_communicator, exception_handler
+
+entities:
+  - type: order
+    states: [received, validated, allocated, paid, shipped, delivered, cancelled, on_hold, returned]
+    terminal_states: [delivered, cancelled, returned]
+    mutually_exclusive:
+      - [shipped, cancelled]
+      - [delivered, cancelled]
+      - [allocated, cancelled]
+      - [paid, cancelled]
+    transitions:
+      - {from: received, to: validated, role: order_validator}
+      - {from: received, to: cancelled, role: order_validator}
+      - {from: validated, to: allocated, role: inventory_allocator}
+      - {from: validated, to: on_hold, role: exception_handler}
+      - {from: allocated, to: paid, role: payment_processor}
+      - {from: paid, to: shipped, role: shipping_coordinator}
+      - {from: shipped, to: delivered, role: shipping_coordinator}
+      - {from: on_hold, to: validated, role: exception_handler}
+      - {from: on_hold, to: cancelled, role: exception_handler}
+    synonyms:
+      validate: validated
+      allocate: allocated
+      ship: shipped
+      deliver: delivered
+      cancel: cancelled
+      pay: paid
+
+  - type: inventory
+    states: [available, reserved, allocated, depleted]
+    terminal_states: [depleted]
+    mutually_exclusive:
+      - [available, depleted]
+    transitions:
+      - {from: available, to: reserved, role: inventory_allocator}
+      - {from: reserved, to: allocated, role: inventory_allocator}
+      - {from: reserved, to: available, role: inventory_allocator}
+      - {from: allocated, to: available, role: exception_handler}
+    synonyms:
+      reserve: reserved
+      free: available
+      release: available
+
+  - type: shipment
+    states: [not_created, pending, in_transit, delivered, failed, returned]
+    terminal_states: [delivered, returned]
+    mutually_exclusive:
+      - [delivered, failed]
+      - [delivered, returned]
+    transitions:
+      - {from: not_created, to: pending, role: shipping_coordinator}
+      - {from: pending, to: in_transit, role: shipping_coordinator}
+      - {from: in_transit, to: delivered, role: shipping_coordinator}
+      - {from: in_transit, to: failed, role: shipping_coordinator}
+      - {from: failed, to: returned, role: exception_handler}
+    synonyms:
+      ship: in_transit
+      deliver: delivered
+
+authorities:
+  - role: exception_handler
+    entity_type: order
+    transitions: [[validated, on_hold], [on_hold, cancelled]]
+    priority: 90
+  - role: inventory_allocator
+    entity_type: inventory
+    transitions: [[available, reserved], [reserved, allocated]]
+    priority: 80
+  - role: shipping_coordinator
+    entity_type: shipment
+    transitions: [[not_created, pending], [pending, in_transit]]
+    priority: 70
+  - role: payment_processor
+    entity_type: order
+    transitions: [[allocated, paid]]
+    priority: 75
+  - role: order_validator
+    entity_type: order
+    transitions: [[received, validated], [received, cancelled]]
+    priority: 60
+  - role: customer_communicator
+    entity_type: order
+    transitions: []
+    priority: 10
+
+temporal_constraints:
+  - before: validate_order
+    after: allocate_inventory
+    entity_type: order
+    description: "Order must be validated before inventory allocation"
+  - before: allocate_inventory
+    after: process_payment
+    entity_type: order
+    description: "Inventory must be allocated before payment"
+  - before: process_payment
+    after: ship_order
+    entity_type: order
+    description: "Payment must be processed before shipping"
+
+vocabulary:
+  validate: validated
+  allocate: allocated
+  reserve: reserved
+  ship: shipped
+  deliver: delivered
+  cancel: cancelled
+  hold: on_hold
+
+resource_constraints:
+  - entity_type: inventory
+    field: quantity
+    constraint: {min: 0}

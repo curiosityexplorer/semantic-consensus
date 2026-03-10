@@ -1,0 +1,12 @@
+# Semantic Consensus Framework (SCF)
+# Core dependencies
+pyyaml>=6.0
+numpy>=1.24.0
+
+# Optional: for embedding-based conflict detection
+# sentence-transformers>=2.2.0
+# torch>=2.0.0
+
+# For experiment analysis
+pandas>=2.0.0
+matplotlib>=3.7.0
