@@ -89,6 +89,4 @@ If you use this work, please cite:
 - ORCID: [0009-0002-0860-9462](https://orcid.org/0009-0002-0860-9462)
 - GitHub: [curiosityexplorer](https://github.com/curiosityexplorer)
 
-## License
 
-MIT License
